@@ -1,30 +1,152 @@
 ---
 title: "Practical Machine Learning Project"
 author: "inlbk"
-date: "March 15, 2017"
-output: html_document
+output: 
+  html_document: 
+    keep_md: yes
 ---
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+```{r, echo=TRUE, eval=TRUE}
 ```
 
-## R Markdown
+##Overview
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect, relatively inexpensively, a large amount of data about personal activity. One thing that people regularly do is quantify how *much* of a particular activity they do; this project seeks to determine how *well* they do it. 
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+To generate the data, six participants were asked to perform one set of 10 repetitions of barbell lifts in a total of 5 different ways: correctly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).  More information is available at the website http://groupware.les.inf.puc-rio.br/har.
 
-```{r cars}
-summary(cars)
+Data collected from accelerometers situated on the dumbbell as well as on the belt, forearm, and arm of the participants is used to create a model to predict the activity class: A, B, C, D, or E.
+
+##Loading R Packages
+
+```{r, echo=TRUE, eval=TRUE, message=FALSE}
+# Load packages
+library(plyr)
+library(dplyr)
+library(data.table)
+library(stringr)
+library(caret)
+library(randomForest)
+library(gbm)
+library(nnet)
+set.seed(5678)
+
 ```
 
-## Including Plots
+##Getting the Data
 
-You can also embed plots, for example:
+The data, located at the following URLs, is first downloaded and read.
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r, echo=TRUE, eval=TRUE}
+trainUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+# Download files and read data
+download.file(trainUrl,destfile = "TrainingData.csv", method = "curl")
+download.file(testUrl,destfile = "TestData.csv", method = "curl")
+TrainInitDat <- read.csv("TrainingData.csv",na.strings=c("NA",""))
+TrainInitDat = as.data.table(TrainInitDat)
+TestInitDat <- read.csv("TestData.csv",na.strings=c("NA",""))
+TestInitDat = as.data.table(TestInitDat)
+dateDownloaded <- date()
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+##Cleaning and Pre-Processing the Data
+Columns with a large number of NAs are identified and removed.  The first seven columns of the data are also removed since they contain user names and other information that is not relevant in creating a prediction model.
+
+```{r, echo=TRUE, eval=TRUE}
+# Find total number of NAs in each column. Result is 0 or 19216 NAs.
+sumNA <- apply(TrainInitDat, 2, function(x) { sum(is.na(x)) })
+table(sumNA)
+
+#Remove NA columns and columns 1-7 (not relevant) from training set.
+TrainDat <- TrainInitDat[, names(which(sumNA==0)[8:60]), with=FALSE]
+TrainDat <- as.data.frame(TrainDat)
+TrainDat$classe <- as.factor(TrainDat$classe)
+
+#Remove same columns from testing set, leaving 52 columns (minus "classe")
+TestDat <- TestInitDat[, names(which(sumNA==0)[8:59]), with=FALSE]
+TestDat <- as.data.frame(TestDat)
+```
+
+A check for variables with near zero variance is performed. No near zero variance variables remain.
+```{r, echo=TRUE, eval=TRUE}
+nearZeroVar(TrainDat, saveMetrics=FALSE)
+```
+
+Both the training and testing data are centered and scaled, using the same parameters for each.
+
+```{r, echo=TRUE, eval=TRUE}
+preObj<-preProcess(TrainDat, method=c("center", "scale"))
+TrainDatTrans<-predict(preObj, TrainDat)
+testing<-predict(preObj,TestDat)
+```
+
+The final training set contains 19,622 observations of 53 variables (including the classification variable "classe"). The test set contains 20 observations of 52 variables (excluding "classe"). The variable names are listed below.
+
+```{r, echo=TRUE, eval=TRUE}
+names(TrainDatTrans)
+```
+
+##Training and Validation Data Sets
+
+The training data is randomly split into two sets: 70% of the data (13,737 observations) is used for training the prediction models and the remaining 5,885 observations (hereafter called the "validation set") is used for evaluating the efficacy of the models.
+
+```{r, echo=TRUE, eval=TRUE}
+#Split into training and validation sets
+intrain <- createDataPartition(y = TrainDatTrans$classe, p=0.7)[[1]]
+training <- TrainDatTrans[intrain,]
+validation <- TrainDatTrans[-intrain,]
+```
+
+Three different prediction models will be created using the training data, and the model with the highest accuracy on the validation set will be selected.
+
+##First Model: Random Forests
+
+The first model uses random forests. This model was selected because it gave good results on a homework problem for the Practical Machine Learning course.
+```{r, echo=TRUE, eval=TRUE}
+set.seed(5678)
+modFit1 <- randomForest(classe ~ ., data=training)
+prediction1 <- predict(modFit1, validation[,1:52])
+cmval1 <- confusionMatrix(prediction1, validation$classe)
+cmval1
+randomForest::varImpPlot(modFit1)
+```
+
+##Second Model: Generalized Boosted Regression
+
+The second model uses generalized boosted regression. With boosting, a group of weak predictors can be combined and weighted to become a much stronger predictor. 
+```{r, echo=TRUE, eval=TRUE}
+set.seed(5678)
+control <- trainControl(method = "repeatedcv", number = 3, repeats = 2)
+modFit2 <- train(classe ~ ., data=training, method = "gbm", verbose = FALSE, trControl = control)
+prediction2 <- predict(modFit2, validation[,1:52])
+cmval2 <- confusionMatrix(prediction2, validation$classe)
+cmval2
+plot(modFit2, ylim=c(0.7, 1))
+```
+
+##Third Model: Neural Network
+
+The third model is a feedforward neural network with one hidden layer containing 17 hidden units.
+
+```{r, echo=TRUE, eval=TRUE}
+library(nnet)
+set.seed(5678)
+modFit3<-nnet(classe~., data=training, size=17, maxit=400, trace=FALSE)
+prediction3 <- predict(modFit3, validation[,1:52], type="class")
+cmval3 <- confusionMatrix(prediction3, validation$classe)
+cmval3
+```
+
+##Comparison of Models
+
+When applied to the validation set, the Random Forest model has an accuracy of `r round(cmval1$overall[[1]]*100,1)`%, the Generalized Boosted Regression model has an accuracy of `r round(cmval2$overall[[1]]*100,1)`%, and the Neural Network model has an accuracy of `r round(cmval3$overall[[1]]*100,1)`%. Because of its high accuracy, the Random Forest model was selected to make predictions on the test set. The expected out-of-sample error for the Random Forest model is `r round(100-cmval1$overall[[1]]*100,2)`%.
+
+##Prediction on the Test Set
+
+Predicted classes for each of the 20 observations in the testing set are listed below.
+```{r, echo=TRUE, eval=TRUE}
+testpredict <- predict(modFit1, testing)
+testpredict
+```
+
